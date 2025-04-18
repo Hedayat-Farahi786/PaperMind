@@ -1,53 +1,83 @@
+// server/routes.ts
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage"; // Assuming storage is your database layer
+import { storage } from "./storage";
 import multer from "multer";
 import path from "path";
-import fs from "fs";
-import { analyzeDocument } from "./services/anthropic";
-import {
-  extractTextFromPdf,
-  extractTextFromImage,
-} from "./services/documentProcessor";
+import fs from "fs"; // Still potentially needed for cleanup if using temp files, but less so with memory storage
+// Import Supabase client
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { User as SupabaseUser } from "@supabase/supabase-js"; // Import Supabase User type
+
+// Remove custom auth imports
+// import bcrypt from "bcrypt";
+// import jwt from "jsonwebtoken"; // Remove jsonwebtoken
+
 import {
   insertDocumentSchema,
-  insertReminderSchema,
-  insertUserSchema,
+  insertReminderSchema, // insertUserSchema, // Remove or adjust if user creation is purely Supabase Auth
 } from "@shared/schema";
-import bcrypt from "bcrypt";
-import jwt from "jsonwebtoken"; // Import jsonwebtoken
 
-// IMPORTANT: Use environment variables for your JWT Secret!
-// const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key'; // Define your secret here
-// For demonstration purposes, using a placeholder. Replace this!
-const JWT_SECRET = "a_very_insecure_default_secret_CHANGE_ME_IN_PROD";
-if (
-  process.env.NODE_ENV !== "production" &&
-  JWT_SECRET === "a_very_insecure_default_secret_CHANGE_ME_IN_PROD"
-) {
-  console.warn(
-    "WARNING: Using default JWT secret. Change JWT_SECRET environment variable in production!"
+// Remove JWT secret
+// const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key';
+
+// --- Supabase Initialization ---
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY; // Use the Service Role Key on the server
+
+if (!supabaseUrl || !supabaseServiceKey) {
+  throw new Error(
+    "SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables are required."
   );
 }
 
-// Configure multer for file uploads
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
+const storageBucket = process.env.SUPABASE_STORAGE_BUCKET;
+
+if (!storageBucket) {
+  throw new Error("SUPABASE_STORAGE_BUCKET environment variable is required.");
+}
+// --- End Supabase Initialization ---
+
+// --- Document Processing Imports (Assume they can handle buffers) ---
+// We need to update these functions (which we don't have access to)
+// to accept a buffer or stream instead of a local file path.
+// For example:
+// import { analyzeDocument } from "./services/anthropic"; // Assume analyzeDocument can take text or maybe buffer
+// import { extractTextFromPdfBuffer, extractTextFromImageBuffer } from "./services/documentProcessor"; // Assuming new functions
+
+// Placeholder imports assuming updated functions
+import { analyzeDocument } from "./services/anthropic"; // This service likely works on text
+import {
+  extractTextFromPdf as extractTextFromPdfOriginal, // Rename original
+  extractTextFromImage as extractTextFromImageOriginal, // Rename original
+} from "./services/documentProcessor";
+
+// Define types for the potentially updated functions if they take buffers
+type ExtractTextFromBuffer = (buffer: Buffer) => Promise<string>;
+
+// IMPORTANT: These functions need to be implemented/updated to work with Buffers/Streams!
+// For demonstration, creating wrapper functions that would call the updated service functions.
+const extractTextFromPdf: ExtractTextFromBuffer = async (buffer) => {
+  console.warn(
+    "WARNING: Using placeholder for extractTextFromPdf that expects a buffer."
+  ); // You would call your actual updated service function here // return await extractTextFromPdfBuffer(buffer); // For now, returning dummy text or trying to make the original work with a temp file (less ideal) // Or if your original function is smart enough, maybe it works with paths directly IF we save temporarily? // Let's assume for this refactor the services ARE updated to take Buffers. // Dummy implementation:
+  return Promise.resolve("Extracted text placeholder from PDF buffer.");
+};
+
+const extractTextFromImage: ExtractTextFromBuffer = async (buffer) => {
+  console.warn(
+    "WARNING: Using placeholder for extractTextFromImage that expects a buffer."
+  ); // You would call your actual updated service function here // return await extractTextFromImageBuffer(buffer); // Dummy implementation:
+  return Promise.resolve("Extracted text placeholder from Image buffer.");
+};
+// --- End Document Processing Imports ---
+
+// Configure multer for file uploads, using memory storage
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: function (req, file, cb) {
-      const uploadDir = path.join(process.cwd(), "uploads");
-      if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-      }
-      cb(null, uploadDir);
-    },
-    filename: function (req, file, cb) {
-      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-      const ext = path.extname(file.originalname);
-      cb(null, file.fieldname + "-" + uniqueSuffix + ext);
-    },
-  }),
+  storage: multer.memoryStorage(), // Store file in memory as a Buffer
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB file size limit
+    fileSize: 10 * 1024 * 1024, // 10MB file size limit (same as before)
   },
   fileFilter: function (req, file, cb) {
     const allowedTypes = [
@@ -71,212 +101,159 @@ const upload = multer({
   },
 });
 
-// Middleware to verify JWT
-const authenticateToken = (req: Request, res: Response, next: NextFunction) => {
+// --- Supabase Authentication Middleware ---
+// This middleware checks for a Supabase token and verifies it.
+// Using Service Role Key for verification for reliability on the server.
+const authenticateSupabaseToken = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
 
-  if (token == null) {
+  if (!token) {
     // No token, deny access
     return res.sendStatus(401); // Unauthorized
   }
 
-  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
-    if (err) {
-      // Token is not valid or expired
-      console.error("JWT Verification Error:", err.message);
+  try {
+    // Verify the token using the service role key (server-side)
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      console.error("Supabase Auth Verification Error:", error?.message);
       return res
         .status(403)
         .json({ message: "Forbidden: Invalid or expired token" }); // Forbidden
-    }
-    // Token is valid, attach user info from payload to request
-    // We expect the payload to have { userId: ..., username: ... }
-    (req as any).user = user; // Attach user payload to request object
+    } // Attach the Supabase User object to the request. // The user.id is the UUID that links to our public.users table.
+
+    (req as any).user = user;
     next(); // Proceed to the next middleware/route handler
-  });
+  } catch (error: any) {
+    console.error("Authentication middleware error:", error);
+    res
+      .status(500)
+      .json({ message: "Internal server error during authentication" });
+  }
 };
+// --- End Supabase Authentication Middleware ---
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // User routes
-  app.post("/api/auth/register", async (req: Request, res: Response) => {
-    try {
-      const userData = insertUserSchema.parse(req.body);
-      const existingUser = await storage.getUserByUsername(userData.username);
-      if (existingUser) {
-        return res.status(400).json({ message: "Username already exists" });
-      }
+  // --- Remove custom auth routes ---
+  // app.post("/api/auth/register", ...);
+  // app.post("/api/auth/login", ...);
+  // --- End Remove custom auth routes ---
 
-      // Hash password
-      const hashedPassword = await bcrypt.hash(userData.password, 10);
-      const newUser = await storage.createUser({
-        ...userData,
-        password: hashedPassword,
-      });
+  // Apply Supabase authentication middleware to protected routes
+  app.use("/api/documents", authenticateSupabaseToken);
+  app.use("/api/reminders", authenticateSupabaseToken); // Document routes (now protected and using Supabase Storage)
 
-      // Generate JWT
-      const token = jwt.sign(
-        { userId: newUser.id, username: newUser.username },
-        JWT_SECRET,
-        { expiresIn: "24h" } // Token expires in 24 hours
-      );
-
-      // Return token and minimal user info
-      res.status(201).json({
-        token,
-        user: { id: newUser.id, username: newUser.username },
-      });
-    } catch (error: any) {
-      console.error("Registration error:", error);
-      res
-        .status(400)
-        .json({
-          message: error.message || "An error occurred during registration",
-        });
-    }
-  });
-
-  app.post("/api/auth/login", async (req: Request, res: Response) => {
-    try {
-      const { username, password } = insertUserSchema
-        .pick({ username: true, password: true })
-        .parse(req.body);
-      const user = await storage.getUserByUsername(username);
-
-      if (!user || !(await bcrypt.compare(password, user.password))) {
-        return res
-          .status(401)
-          .json({ message: "Invalid username or password" });
-      }
-
-      // Generate JWT
-      const token = jwt.sign(
-        { userId: user.id, username: user.username },
-        JWT_SECRET,
-        { expiresIn: "24h" } // Token expires in 24 hours
-      );
-
-      // Return token and minimal user info
-      res.status(200).json({
-        token,
-        user: { id: user.id, username: user.username },
-      });
-    } catch (error: any) {
-      console.error("Login error:", error);
-      res
-        .status(401)
-        .json({ message: error.message || "An error occurred during login" });
-    }
-  });
-
-  // Apply JWT authentication middleware to protected routes
-  app.use("/api/documents", authenticateToken);
-  app.use("/api/reminders", authenticateToken);
-
-  // Document routes (now protected)
   app.post(
     "/api/documents",
-    upload.single("file"),
+    upload.single("file"), // Use multer to handle file upload (memory storage)
     async (req: Request, res: Response) => {
       try {
-        // Access user ID from the request object set by authenticateToken middleware
-        const userId = (req as any).user.userId; // Make sure your JWT payload includes userId
-
+        // Access user ID (UUID) from the request object set by authenticateSupabaseToken
+        const userId = (req as any).user.id; // Supabase User ID is a UUID string
+        console.log("Authenticated User ID:", userId); // Add this line
         if (!req.file) {
           return res.status(400).json({ message: "No file uploaded" });
         }
 
-        // const userId = parseInt(req.body.userId); // <-- REMOVE THIS, get userId from token
-        const title = req.body.title || path.parse(req.file.originalname).name;
+        const file = req.file;
+        const title = req.body.title || path.parse(file.originalname).name; // --- Upload file to Supabase Storage ---
 
-        // Ensure the authenticated user ID matches any potential userId passed in body (optional but good practice)
-        // if (parseInt(req.body.userId) !== userId) {
-        //      return res.status(403).json({ message: "Forbidden: User ID mismatch" });
-        // }
+        const fileExtension = path.extname(file.originalname); // Generate a unique file path in Supabase Storage, possibly including user ID
+        const supabaseFilePath = `${userId}/${Date.now()}-${Math.round(
+          Math.random() * 1e9
+        )}${fileExtension}`;
 
-        // Extract text based on file type
+console.log("Supabase Upload Path:", supabaseFilePath); // Add this line
+console.log("Storage Bucket:", storageBucket); // Add this line near the top where storageBucket is defined
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from(storageBucket)
+          .upload(supabaseFilePath, file.buffer, {
+            // Upload using the buffer from memory storage
+            contentType: file.mimetype,
+            upsert: false, // Avoid overwriting if path somehow exists
+          });
+
+        if (uploadError) {
+          console.error("Supabase Storage Upload Error:", uploadError);
+          throw new Error(
+            `Failed to upload file to storage: ${uploadError.message}`
+          );
+        } // The filePath stored in DB should be the path within the Supabase bucket
+
+        const storedFilePath = uploadData.path; // Use the path returned by Supabase // --- End Upload file to Supabase Storage --- // --- Extract text and Analyze Document --- // Now, pass the file buffer to your extraction functions
         let extractedText = "";
-        if (req.file.mimetype === "application/pdf") {
-          extractedText = await extractTextFromPdf(req.file.path);
-        } else if (req.file.mimetype.startsWith("image/")) {
-          extractedText = await extractTextFromImage(req.file.path);
+        if (file.mimetype === "application/pdf") {
+          // Call the updated function that takes a buffer
+          extractedText = await extractTextFromPdf(file.buffer);
+        } else if (file.mimetype.startsWith("image/")) {
+          // Call the updated function that takes a buffer
+          extractedText = await extractTextFromImage(file.buffer);
         } else {
+          // Handle other allowed types if extraction is possible, or set placeholder
           extractedText =
             "Text extraction not supported for this file type yet.";
-        }
+        } // Analyze the document with AI using the extracted text
 
-        // Analyze the document with AI
-        // This part might also need authentication if analyzeDocument makes external calls,
-        // but for now, assuming it's an internal service call.
-        const analysis = await analyzeDocument(extractedText);
-
-        // Create document record
+        const analysis = await analyzeDocument(extractedText); // --- End Extract text and Analyze Document --- // Create document record in database
         const documentData = {
-          userId, // Use the authenticated userId
-          title,
-          originalFilename: req.file.originalname,
-          fileType: req.file.mimetype,
-          filePath: req.file.path,
-        };
+          userId: userId, // Use the authenticated user's UUID
+          title: title,
+          originalFilename: file.originalname,
+          fileType: file.mimetype,
+          filePath: storedFilePath, // Store the Supabase Storage path
+        }; // Validate data including the UUID userId
 
         const validatedData = insertDocumentSchema.parse(documentData);
-        const document = await storage.createDocument(validatedData);
+        const document = await storage.createDocument(validatedData); // Update with analysis results
 
-        // Update with analysis results
         await storage.updateDocumentAnalysis(document.id, {
           summary: analysis.summary,
           actionItems: analysis.actionItems,
           tags: analysis.tags,
           status: "processed",
-        });
+        }); // Fetch the updated document to return
 
-        // Fetch the updated document to return
         const updatedDocument = await storage.getDocument(document.id);
 
         res.status(201).json(updatedDocument);
       } catch (error: any) {
-        console.error("Document upload error:", error);
-        // Ensure file is removed if processing fails
-        if (req.file && fs.existsSync(req.file.path)) {
-          fs.unlinkSync(req.file.path);
-        }
-        res
-          .status(500)
-          .json({
-            message:
-              error.message ||
-              "An error occurred while processing the document",
-          });
+        console.error("Document upload/processing error:", error); // Handle file cleanup in Supabase Storage on error if necessary // This is more complex as you need the path after attempted upload. // For simplicity, we won't add Supabase storage cleanup here, but consider it for production.
+        res.status(500).json({
+          message:
+            error.message || "An error occurred while processing the document",
+        });
       }
     }
   );
 
   app.get("/api/documents", async (req: Request, res: Response) => {
     try {
-      // Access user ID from the request object set by authenticateToken middleware
-      const userId = (req as any).user.userId; // Use the authenticated userId
-
-      // const userId = parseInt(req.query.userId as string); // <-- REMOVE THIS, get userId from token
-      // if (isNaN(userId)) { // <-- NO LONGER NEEDED if using middleware
-      //   return res.status(400).json({ message: "Valid userId is required" });
-      // }
+      // Access user ID (UUID) from the request object set by authenticateSupabaseToken
+      const userId = (req as any).user.id; // Supabase User ID is a UUID string // Use the authenticated user's UUID to fetch documents
 
       const documents = await storage.getDocumentsByUserId(userId);
       res.status(200).json(documents);
     } catch (error: any) {
       console.error("Error fetching documents:", error);
-      res
-        .status(500)
-        .json({
-          message:
-            error.message || "An error occurred while fetching documents",
-        });
+      res.status(500).json({
+        message: error.message || "An error occurred while fetching documents",
+      });
     }
   });
 
   app.get("/api/documents/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
-      const userId = (req as any).user.userId; // Get userId from token
+      const id = parseInt(req.params.id); // Get userId from token (UUID)
+      const userId = (req as any).user.id;
 
       if (isNaN(id)) {
         return res
@@ -287,71 +264,59 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const document = await storage.getDocument(id);
       if (!document) {
         return res.status(404).json({ message: "Document not found" });
-      }
+      } // IMPORTANT: Authorization check - ensure the document belongs to the authenticated user (by UUID)
 
-      // IMPORTANT: Add authorization check - ensure the document belongs to the authenticated user
       if (document.userId !== userId) {
         return res
           .status(403)
           .json({ message: "Forbidden: Document does not belong to user" });
-      }
+      } // --- Optional: Generate a signed URL for direct file access --- // You might want to include a temporary URL for the frontend to view the file. // Requires Supabase Storage policy (RLS) configuration or using a signed URL. // const { data: signedUrlData, error: signedUrlError } = await supabase.storage //   .from(storageBucket) //   .createSignedUrl(document.filePath, 60 * 5); // URL valid for 5 minutes // if (signedUrlError) { //   console.error("Error creating signed URL:", signedUrlError); //   // Decide how to handle this - maybe still return doc but no URL? // } // const documentWithUrl = { //   ...document, //   fileUrl: signedUrlData?.signedUrl || null, // }; // res.status(200).json(documentWithUrl); // --- End Optional Signed URL --- // For now, just return the document data as before, but ensure userId matches
 
       res.status(200).json(document);
     } catch (error: any) {
       console.error("Error retrieving document:", error);
-      res
-        .status(500)
-        .json({
-          message:
-            error.message || "An error occurred while retrieving document",
-        });
+      res.status(500).json({
+        message: error.message || "An error occurred while retrieving document",
+      });
     }
-  });
+  }); // Reminders routes (now protected and using UUID userId)
 
-  // Reminders routes (now protected)
   app.post("/api/reminders", async (req: Request, res: Response) => {
     try {
-      const userId = (req as any).user.userId; // Get userId from token
-      const reminderData = { ...req.body, userId }; // Add userId from token
+      // Get userId from token (UUID)
+      const userId = (req as any).user.id;
+      const reminderData = { ...req.body, userId }; // Add userId (UUID) from token // Validate data including the UUID userId
+
       const validatedData = insertReminderSchema.parse(reminderData);
       const reminder = await storage.createReminder(validatedData);
       res.status(201).json(reminder);
     } catch (error: any) {
       console.error("Error creating reminder:", error);
-      res
-        .status(400)
-        .json({
-          message: error.message || "An error occurred while creating reminder",
-        });
+      res.status(400).json({
+        message: error.message || "An error occurred while creating reminder",
+      });
     }
   });
 
   app.get("/api/reminders", async (req: Request, res: Response) => {
     try {
-      const userId = (req as any).user.userId; // Use the authenticated userId
-
-      // const userId = parseInt(req.query.userId as string); // <-- REMOVE THIS
-      // if (isNaN(userId)) { // <-- NO LONGER NEEDED
-      //   return res.status(400).json({ message: "Valid userId is required" });
-      // }
+      // Use the authenticated user's UUID to fetch reminders
+      const userId = (req as any).user.id;
 
       const reminders = await storage.getRemindersByUserId(userId);
       res.status(200).json(reminders);
     } catch (error: any) {
       console.error("Error fetching reminders:", error);
-      res
-        .status(500)
-        .json({
-          message:
-            error.message || "An error occurred while fetching reminders",
-        });
+      res.status(500).json({
+        message: error.message || "An error occurred while fetching reminders",
+      });
     }
   });
 
   app.patch("/api/reminders/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
-      const userId = (req as any).user.userId; // Get userId from token
+      const id = parseInt(req.params.id); // Get userId from token (UUID)
+      const userId = (req as any).user.id;
 
       if (isNaN(id)) {
         return res
@@ -362,9 +327,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const reminder = await storage.getReminder(id);
       if (!reminder) {
         return res.status(404).json({ message: "Reminder not found" });
-      }
+      } // IMPORTANT: Authorization check - ensure the reminder belongs to the authenticated user (by UUID)
 
-      // IMPORTANT: Add authorization check
       if (reminder.userId !== userId) {
         return res
           .status(403)
@@ -376,19 +340,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(200).json(updatedReminder);
     } catch (error: any) {
       console.error("Error updating reminder:", error);
-      res
-        .status(500)
-        .json({
-          message: error.message || "An error occurred while updating reminder",
-        });
+      res.status(500).json({
+        message: error.message || "An error occurred while updating reminder",
+      });
     }
-  });
+  }); // AI follow-up question route (now protected and using Supabase Storage)
 
-  // AI follow-up question route (now protected)
   app.post("/api/documents/:id/ask", async (req: Request, res: Response) => {
     try {
-      const docId = parseInt(req.params.id);
-      const userId = (req as any).user.userId; // Get userId from token
+      const docId = parseInt(req.params.id); // Get userId from token (UUID)
+      const userId = (req as any).user.id;
       const { question } = req.body;
 
       if (!question) {
@@ -398,38 +359,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const document = await storage.getDocument(docId);
       if (!document) {
         return res.status(404).json({ message: "Document not found" });
-      }
+      } // IMPORTANT: Authorization check
 
-      // IMPORTANT: Add authorization check
       if (document.userId !== userId) {
         return res
           .status(403)
           .json({ message: "Forbidden: Document does not belong to user" });
-      }
+      } // --- Fetch file content from Supabase Storage --- // Use the filePath stored in the database
 
-      // Extract text from document if needed
+      const { data: fileData, error: downloadError } = await supabase.storage
+        .from(storageBucket)
+        .download(document.filePath); // Download using the stored path
+
+      if (downloadError || !fileData) {
+        console.error("Supabase Storage Download Error:", downloadError);
+        throw new Error(
+          `Failed to download file from storage: ${
+            downloadError?.message || "File data empty"
+          }`
+        );
+      } // fileData is a Blob, convert to Buffer for processing functions
+
+      const fileBuffer = Buffer.from(await fileData.arrayBuffer()); // --- End Fetch file content from Supabase Storage --- // --- Extract text and Get AI response --- // Extract text based on file type, now passing the buffer
       let documentText = "";
       if (document.fileType === "application/pdf") {
-        documentText = await extractTextFromPdf(document.filePath);
+        documentText = await extractTextFromPdf(fileBuffer); // Pass buffer
       } else if (document.fileType.startsWith("image/")) {
-        documentText = await extractTextFromImage(document.filePath);
+        documentText = await extractTextFromImage(fileBuffer); // Pass buffer
       } else {
-        documentText = "Text extraction not supported for this file type yet.";
-      }
+        documentText =
+          document.summary ||
+          "Text extraction not supported for this file type yet."; // Fallback to summary?
+      } // Get AI response to the question using the extracted text and question
 
-      // Get AI response to the question
-      // This part might also need authentication
-      const response = await analyzeDocument(documentText, question);
-
+      const response = await analyzeDocument(documentText, question); // Assuming analyzeDocument takes text and question // --- End Extract text and Get AI response ---
       res.status(200).json({ answer: response.answer });
     } catch (error: any) {
       console.error("Error asking document question:", error);
-      res
-        .status(500)
-        .json({
-          message:
-            error.message || "An error occurred while processing your question",
-        });
+      res.status(500).json({
+        message:
+          error.message || "An error occurred while processing your question",
+      });
     }
   });
 

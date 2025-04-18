@@ -54,7 +54,7 @@ Please provide:
 Format your response as JSON with the following structure:
 {
   "summary": "bullet point summary here",
-  "actionItems": [{"task": "task description", "dueDate": "YYYY-MM-DD (if available)", "priority": "high/medium/low"}],
+  "actionItems": [{"task": "task description", "dueDate": "due date in this format YYYY-MM-DD (if available, if not then today's date)", "priority": "high/medium/low"}],
   "tags": ["tag1", "tag2", "tag3"]
 }
 `;

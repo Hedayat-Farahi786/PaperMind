@@ -1,252 +1,188 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-// import jwt from 'jsonwebtoken'; // REMOVE: jsonwebtoken is for server-side signing/verification
+// client/src/contexts/AuthContext.tsx
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  ReactNode,
+} from "react";
+// Import Supabase client
+import {
+  createClient,
+  User as SupabaseUser,
+  Session,
+} from "@supabase/supabase-js";
+// Remove old imports:
+// import jwt from 'jsonwebtoken';
+// import { useLocation } from 'wouter'; // This hook is used in Auth.tsx, not the context
 
-// Define a minimal User interface based on what the token payload contains
-// This should match the payload structure you use when signing the token on the backend
+// IMPORTANT: Use environment variables for your Supabase URL and Anon Key
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY; // vite syntax for env vars
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    "Supabase URL and Anon Key environment variables are required."
+  );
+}
+
+// Initialize Supabase client
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// Define User interface based on Supabase User
+// This User object comes directly from Supabase Auth
+// It includes the UUID id
 interface User {
-  id: number;
-  username: string;
-  // Add other non-sensitive fields if included in the token payload (e.g., name, email if present and not sensitive)
-  name?: string;
-  email?: string;
+  id: string; // Supabase user ID is a UUID
+  email?: string; // Add other fields from the Supabase User object or user_metadata if needed
+  user_metadata: {
+    name?: string; // Assuming 'name' might be stored in user_metadata
+    [key: string]: any; // Allow other metadata properties
+  }; // Add more properties from SupabaseUser if you use them (e.g., created_at, last_sign_in_at)
 }
 
 interface AuthContextProps {
-  user: User | null;
-  token: string | null; // Add token to context state
-  isAuthenticated: boolean;
-  isLoading: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  register: (username: string, password: string, name?: string, email?: string) => Promise<void>;
-  logout: () => void;
-  // Helper function to get auth headers for API calls
-  getAuthHeaders: () => { Authorization?: string };
+  // user is now the SupabaseUser object or null
+  user: User | null; // Use our defined User interface
+  token: string | null; // Supabase access token
+  isAuthenticated: boolean;
+  isLoading: boolean; // For initial auth state check // login and register now use Supabase Auth methods (typically email/password)
+  login: (email: string, password: string) => Promise<void>; // Register might take email, password, and other user data
+  register: (
+    email: string,
+    password: string,
+    data?: { name?: string }
+  ) => Promise<void>;
+  logout: () => Promise<void>; // Logout is async with Supabase // Helper function to get auth headers for API calls using the Supabase session token
+  getAuthHeaders: () => { Authorization?: string };
 }
 
 const AuthContext = createContext<AuthContextProps | undefined>(undefined);
 
-// Helper function to safely decode JWT payload client-side
-function decodeJwtPayload(token: string): User | null {
-    try {
-        const parts = token.split('.');
-        if (parts.length !== 3) {
-            // Not a valid JWT structure (header.payload.signature)
-            return null;
-        }
-        const payload = parts[1]; // Get the payload part (middle part)
-
-        // Base64Url decode (replace - with +, _ with /) and pad if necessary
-        let base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-        while (base64.length % 4 !== 0) {
-            base64 += '=';
-        }
-
-        // Use browser's atob to decode standard base64
-        const decodedPayload = atob(base64);
-
-        // Parse the JSON string
-        const payloadObj = JSON.parse(decodedPayload);
-
-        // Check if it contains expected user fields
-        if (payloadObj && typeof payloadObj.userId === 'number' && typeof payloadObj.username === 'string') {
-            // Map payload fields to your User interface
-            return {
-                id: payloadObj.userId,
-                username: payloadObj.username,
-                name: payloadObj.name, // Include if you added it to the payload
-                email: payloadObj.email, // Include if you added it to the payload
-                // ... other fields from payload mapped to User
-            };
-        }
-
-        return null; // Payload doesn't contain expected user info
-
-    } catch (error) {
-        console.error("Failed to decode JWT payload:", error);
-        return null; // Decoding or parsing failed
-    }
-}
-
+// Remove the custom decodeJwtPayload function
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  // Store token and a minimal user object derived from the initial auth response/token
-  const [token, setToken] = useState<string | null>(null);
-  const [user, setUser] = useState<User | null>(null); // Store minimal user info
-  const [isLoading, setIsLoading] = useState(true);
+  // Use Supabase's session object to manage auth state
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<User | null>(null); // Map SupabaseUser to our User interface
+  const [isLoading, setIsLoading] = useState(true); // Loading state for the initial session check // Effect to listen for Supabase auth state changes
 
-  // Check for existing token on mount
-  useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const storedToken = localStorage.getItem('token');
-        if (storedToken) {
-            // Client-side decode to get user info for UI.
-            // **IMPORTANT:** This does NOT verify the token's validity (signature/expiry).
-            // Authentication and authorization rely on the backend verifying the token on EACH protected request.
-            const userData = decodeJwtPayload(storedToken);
+  useEffect(() => {
+    // This subscription handles initial session loading and subsequent state changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, currentSession) => {
+      setSession(currentSession); // Map the Supabase User object to our minimal User interface
+      setUser(
+        currentSession
+          ? ({
+              id: currentSession.user.id,
+              email: currentSession.user.email,
+              user_metadata: currentSession.user.user_metadata,
+            } as User)
+          : null
+      ); // Cast to User interface
+      setIsLoading(false); // Auth state is determined
+    }); // Cleanup subscription on unmount
 
-            if (userData) {
-                setToken(storedToken);
-                setUser(userData); // Set minimal user info from decoded payload
-            } else {
-                 // If payload is invalid or missing user info, clear the token
-                localStorage.removeItem('token');
-                setToken(null);
-                setUser(null);
-            }
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []); // Run only once on mount // Login function using Supabase Auth // Supabase typically uses email/password for built-in auth
 
-        }
-      } catch (error) {
-        console.error('Error checking auth:', error);
-        // Clear token if there's an unexpected error
-         localStorage.removeItem('token');
-         setToken(null);
-         setUser(null);
-      } finally {
-        setIsLoading(false);
-      }
-    };
+  const login = async (email: string, password: string) => {
+    setIsLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    setIsLoading(false); // setIsLoading should be inside onAuthStateChange or after the await
 
-    checkAuth();
-  }, []);
+    if (error) {
+      console.error("Supabase Login error:", error.message);
+      throw new Error(error.message || "Login failed");
+    } // Auth state change is handled by the onAuthStateChange listener
+  }; // Register function using Supabase Auth // Supabase typically uses email/password for built-in auth
 
-  // Effect to sync state with localStorage changes from other tabs/windows (optional but good practice)
-   useEffect(() => {
-     const handleStorageChange = () => {
-       const storedToken = localStorage.getItem('token');
-       if (storedToken !== token) { // Only update if it's actually different
-         if (storedToken) {
-            const userData = decodeJwtPayload(storedToken);
-            setToken(storedToken);
-            setUser(userData);
-         } else {
-            setToken(null);
-            setUser(null);
-         }
-       }
-     };
+  const register = async (
+    email: string,
+    password: string,
+    data?: { name?: string }
+  ) => {
+    setIsLoading(true);
+    const {
+      data: { user: registeredUser, session: registeredSession },
+      error,
+    } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: data, // Optional: store additional user metadata like name // redirectTo: 'your-redirect-url', // Optional: for email confirmation flow
+      },
+    });
 
-     window.addEventListener('storage', handleStorageChange);
+    setIsLoading(false); // setIsLoading should be inside onAuthStateChange or after the await
 
-     return () => {
-       window.removeEventListener('storage', handleStorageChange);
-     };
-   }, [token]); // Depend on token state to avoid infinite loops but react to its changes
+    if (error) {
+      console.error("Supabase Registration error:", error.message);
+      throw new Error(error.message || "Registration failed");
+    } // Important: If email confirmation is required, registeredUser/registeredSession might be null initially. // For simplicity here, we assume no confirmation or that confirmation happens out of band. // The onAuthStateChange listener will update the state if session is created immediately. // If you need to immediately insert into your public 'users' table after Supabase Auth signup, // you would do it here using the returned registeredUser.id and potential data.name // However, it's often safer to trigger this from the backend via a Supabase Function or Webhook // on auth.users INSERT event to ensure the user exists in auth before creating the profile record. // For now, we'll assume the backend handles creating the public.users row based on the auth.users row.
 
+    if (registeredUser && registeredSession) {
+      console.log("User registered successfully:", registeredUser); // onAuthStateChange listener will update context state
+    } else {
+      // This case happens if email confirmation is enabled and required before session creation
+      throw new Error(
+        "Registration successful, please check your email to confirm."
+      );
+    }
+  }; // Logout function using Supabase Auth
 
-  const login = async (username: string, password: string) => {
-    try {
-      setIsLoading(true);
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
+  const logout = async () => {
+    setIsLoading(true); // Set loading state during logout
+    const { error } = await supabase.auth.signOut();
+    setIsLoading(false); // Set loading state after logout
 
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.message || 'Login failed');
-      }
+    if (error) {
+      console.error("Supabase Logout error:", error.message); // Optionally throw or handle error, but usually logout client-side should clear state regardless
+    } // onAuthStateChange listener will set session/user to null
+  }; // Helper to get auth headers using the current session token
 
-      // Expecting { token: '...', user: { id: ..., username: ... } } from backend
-      const { token: receivedToken, user: receivedUser } = await response.json();
+  const getAuthHeaders = () => {
+    // Use the session's access_token provided by Supabase
+    if (session?.access_token) {
+      return { Authorization: `Bearer ${session.access_token}` };
+    }
+    return {}; // Return empty object if no active session
+  }; // isAuthenticated is true if a session and user exist
 
-      // Validate received data structure
-      if (typeof receivedToken !== 'string' || !receivedUser || typeof receivedUser.id !== 'number' || typeof receivedUser.username !== 'string') {
-           throw new Error('Invalid response format from server');
-      }
+  const isAuthenticated = !!session && !!user; // Check for both session and user
 
-      setToken(receivedToken);
-      setUser(receivedUser); // Set minimal user info from response
-      localStorage.setItem('token', receivedToken); // Store only the token
-
-    } catch (error: any) {
-      console.error("Login error:", error);
-      // Clear any potentially stale token/user on failed login attempt
-      setToken(null);
-      setUser(null);
-      localStorage.removeItem('token');
-      throw new Error(error.message || 'Invalid username or password');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const register = async (username: string, password: string, name?: string, email?: string) => {
-    try {
-      setIsLoading(true);
-      const response = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, name, email }),
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.message || 'Registration failed');
-      }
-
-       // Expecting { token: '...', user: { id: ..., username: ... } } from backend
-      const { token: receivedToken, user: receivedUser } = await response.json();
-
-       // Validate received data structure
-      if (typeof receivedToken !== 'string' || !receivedUser || typeof receivedUser.id !== 'number' || typeof receivedUser.username !== 'string') {
-           throw new Error('Invalid response format from server');
-      }
-
-      setToken(receivedToken);
-      setUser(receivedUser); // Set minimal user info from response
-      localStorage.setItem('token', receivedToken); // Store only the token
-
-    } catch (error: any) {
-       console.error("Registration error:", error);
-      // Clear any potentially stale token/user on failed registration attempt
-      setToken(null);
-      setUser(null);
-      localStorage.removeItem('token');
-      throw new Error(error.message || 'Registration failed');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const logout = () => {
-    setToken(null);
-    setUser(null);
-    localStorage.removeItem('token'); // Remove the token from storage
-    // Consider redirecting after logout in components that use useAuth().logout()
-  };
-
-  // Helper to get auth headers for API requests
-  const getAuthHeaders = () => {
-      if (token) { // <-- Use the 'token' state variable directly
-          return { Authorization: `Bearer ${token}` };
-      }
-      return {}; // Return empty object if no token
-  }
-
-  return (
-    <AuthContext.Provider
-      value={{
-        user,
-        token, // Provide token in context
-        isAuthenticated: !!token, // Authenticated if token exists
-        isLoading,
-        login,
-        register,
-        logout,
-        getAuthHeaders // Provide header helper
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
-  );
+  return (
+    <AuthContext.Provider
+      value={{
+        user,
+        token: session?.access_token || null, // Provide Supabase access token
+        isAuthenticated,
+        isLoading, // Still need isLoading for the initial session check
+        login,
+        register,
+        logout,
+        getAuthHeaders,
+      }}
+    >
+                  {/* Render children only after the initial loading check */} 
+                {!isLoading && children}           {" "}
+      {/* You might want a loading spinner here instead */}           {" "}
+      {isLoading && <div>Loading authentication state...</div>}       {" "}
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth() {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return context;
 }
